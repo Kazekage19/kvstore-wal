@@ -1,0 +1,12 @@
+target/
+*.class
+*.jar
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# local store data produced by tests / manual runs
+data/
+*.data
+*.hint
