@@ -14,7 +14,7 @@ import java.util.zip.CRC32;
 
 /**
  * A persistent key-value store. Ugly on purpose, for now.
- *
+ * <p>
  * Everything lives in this one class today. We will pull classes OUT of it
  * next weekend, once there is working code to point at.
  */
@@ -25,9 +25,12 @@ public class KVStore implements AutoCloseable {
      * Package-private so tests in the same package can inspect it; there is no
      * public read path yet.
      */
-    record Location(int fileId, long offset, int size) { }
+    record Location(int fileId, long offset, int size) {
+    }
 
-    /** The keydir: key -> where to find it. Lives in RAM, dies on restart. */
+    /**
+     * The keydir: key -> where to find it. Lives in RAM, dies on restart.
+     */
     final Map<String, Location> keydir = new HashMap<>();
 
     private final FileChannel channel;
@@ -37,6 +40,7 @@ public class KVStore implements AutoCloseable {
         RandomAccessFile raf = new RandomAccessFile(dataFile.toFile(), "rw");
         this.channel = raf.getChannel();
         this.channel.position(this.channel.size());   // always append at the end
+        restore();
     }
 
     public void put(String key, byte[] value) throws IOException {
@@ -120,7 +124,7 @@ public class KVStore implements AutoCloseable {
             crc.update(buffer.array(), 4, location.size() - 4);
             int recomputedCrc = (int) crc.getValue();
             if (storedCrc != recomputedCrc) {
-                throw  new IOException("Wrong checksum");
+                throw new IOException("Wrong checksum");
             }
             long ts = buffer.getLong();
             int keySize = buffer.getInt();
@@ -133,9 +137,32 @@ public class KVStore implements AutoCloseable {
                 throw new IllegalStateException("Key does not match with the key at offset");
             }
             return value;
-        }
-        else {
+        } else {
             return null;
+        }
+    }
+
+    public void restore() throws IOException {
+        long currentOffset = 0;
+        while (true) {
+            ByteBuffer headerBuffer = ByteBuffer.allocate(20);
+            if (channel.read(headerBuffer, currentOffset) == -1) {
+                return;
+            }
+            headerBuffer.flip();
+            int crc = headerBuffer.getInt();
+            long ts = headerBuffer.getLong();
+            int keySize = headerBuffer.getInt();
+            int valSize = headerBuffer.getInt();
+            ByteBuffer keyAndValueBuffer = ByteBuffer.allocate(keySize);
+            channel.read(keyAndValueBuffer, currentOffset + 20);
+            keyAndValueBuffer.flip();
+            byte[] keyBytes = new byte[keySize];
+            keyAndValueBuffer.get(keyBytes);
+            String key = new String(keyBytes, StandardCharsets.UTF_8);
+            Location currentLocation = new Location(0, currentOffset, 20 + keySize + valSize);
+            keydir.put(key, currentLocation);
+            currentOffset += (20 + keySize + valSize);
         }
     }
 

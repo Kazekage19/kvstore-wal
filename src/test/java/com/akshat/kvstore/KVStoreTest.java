@@ -4,14 +4,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class KVStoreTest {
 
-    /** JUnit creates a fresh empty directory per test and deletes it after. */
+    /**
+     * JUnit creates a fresh empty directory per test and deletes it after.
+     */
     @TempDir
     Path tmp;
 
@@ -53,5 +57,29 @@ class KVStoreTest {
         store.put("user:2", "bob".getBytes());
         store.put("user:1", "amy".getBytes());
         assertEquals("amy", new String(store.get("user:1")));
+    }
+
+    @Test
+    void putWithOverwrite()
+        throws Exception {
+        Path dataFile = tmp.resolve("data.db");
+        KVStore store = new KVStore(dataFile);
+        store.put("user:1", "ann".getBytes());
+        store.put("user:2", "robert".getBytes());
+        store.keydir.put("user:1", new KVStore.Location(0, 29, 32));
+        assertThrows(IllegalStateException.class, () -> store.get("user:1"));
+    }
+
+    @Test
+    void testRestore() throws IOException {
+        Path dataFile = tmp.resolve("data.db");
+        KVStore store = new KVStore(dataFile);
+        store.put("user:1", "ann".getBytes());
+        store.put("user:2", "bob".getBytes());
+        store.put("user:1", "amy".getBytes());
+        store.keydir.clear();
+        store.close();
+        store = new KVStore(dataFile);
+        assertEquals("amy", new String(store.get("user:1"), StandardCharsets.UTF_8));
     }
 }
