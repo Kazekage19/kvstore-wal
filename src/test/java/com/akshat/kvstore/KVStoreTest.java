@@ -4,12 +4,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.*;
 
 class KVStoreTest {
 
@@ -81,5 +83,57 @@ class KVStoreTest {
         store.close();
         store = new KVStore(dataFile);
         assertEquals("amy", new String(store.get("user:1"), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void restoreTruncatesCorruptTail() throws IOException {
+        Path dataFile = tmp.resolve("data.db");
+        try (KVStore store = new KVStore(dataFile)) {
+            store.put("user:1", "ann".getBytes(StandardCharsets.UTF_8));
+            store.put("user:2", "bob".getBytes(StandardCharsets.UTF_8));
+            store.put("user:1", "amy".getBytes(StandardCharsets.UTF_8));
+        }
+        long goodSize = Files.size(dataFile);
+        Files.write(dataFile, new byte[]{7, 7, 7, 7, 7},
+                StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+        assertTrue(Files.size(dataFile) > goodSize, "file should be larger after corruption");
+
+        try (KVStore store = new KVStore(dataFile)) {
+            assertEquals("amy", new String(store.get("user:1"), StandardCharsets.UTF_8));
+            assertEquals("bob", new String(store.get("user:2"), StandardCharsets.UTF_8));
+            assertEquals(goodSize, Files.size(dataFile), "corrupt tail must be truncated back");
+            store.put("user:3", "cara".getBytes(StandardCharsets.UTF_8));
+        }
+
+        try (KVStore store = new KVStore(dataFile)) {
+            assertEquals("cara", new String(store.get("user:3"), StandardCharsets.UTF_8));
+            assertEquals("amy",  new String(store.get("user:1"), StandardCharsets.UTF_8));
+            ByteBuffer badHeader = ByteBuffer.allocate(20);
+            badHeader.putInt(0);         // crc      (4)  — irrelevant; guard 2 fires before the CRC check
+            badHeader.putLong(0L);       // timestamp(8)
+            badHeader.putInt(9999);      // keySize  (4)  — the poison: claims 9999 bytes that aren't there
+            badHeader.putInt(0);         // valSize  (4)
+            Files.write(dataFile, badHeader.array(), StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+            store.restore();
+
+            ByteBuffer anotherBadHeader = ByteBuffer.allocate(20);
+            anotherBadHeader.putInt(0);         // crc      (4)  — irrelevant; guard 2 fires before the CRC check
+            anotherBadHeader.putLong(0L);       // timestamp(8)
+            anotherBadHeader.putInt(-1);      // keySize  (4)  — the poison: claims 9999 bytes that aren't there
+            anotherBadHeader.putInt(0);
+            Files.write(dataFile, badHeader.array(), StandardOpenOption.WRITE, StandardOpenOption.APPEND);
+            store.restore();
+
+            // after writing good records + closing, with goodSize = Files.size(dataFile):
+            try (FileChannel fc = FileChannel.open(dataFile,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+                long pos = goodSize - 1;                     // last byte of the last record's value
+                ByteBuffer b = ByteBuffer.allocate(1);
+                fc.read(b, pos);                             // read the byte there
+                byte flipped = (byte) (b.get(0) ^ 0xFF);     // invert its bits
+                fc.write(ByteBuffer.wrap(new byte[]{flipped}), pos);   // write it back at the SAME position
+            }
+            store.restore();
+        }
     }
 }

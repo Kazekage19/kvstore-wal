@@ -39,8 +39,8 @@ public class KVStore implements AutoCloseable {
     public KVStore(Path dataFile) throws IOException {
         RandomAccessFile raf = new RandomAccessFile(dataFile.toFile(), "rw");
         this.channel = raf.getChannel();
-        this.channel.position(this.channel.size());   // always append at the end
         restore();
+        this.channel.position(this.channel.size());   // always append at the end
     }
 
     public void put(String key, byte[] value) throws IOException {
@@ -144,26 +144,52 @@ public class KVStore implements AutoCloseable {
 
     public void restore() throws IOException {
         long currentOffset = 0;
+        long fileSize = channel.size();
+        if (fileSize == 0) {
+            return;
+        }
         while (true) {
+            if (currentOffset + 20L > fileSize) {
+                truncateCorruptTail(currentOffset, "Insufficient bytes at the end");
+                return;
+            }
             ByteBuffer headerBuffer = ByteBuffer.allocate(20);
             if (channel.read(headerBuffer, currentOffset) == -1) {
                 return;
             }
             headerBuffer.flip();
-            int crc = headerBuffer.getInt();
+            int storedCrc = headerBuffer.getInt();
             long ts = headerBuffer.getLong();
             int keySize = headerBuffer.getInt();
             int valSize = headerBuffer.getInt();
-            ByteBuffer keyAndValueBuffer = ByteBuffer.allocate(keySize);
-            channel.read(keyAndValueBuffer, currentOffset + 20);
-            keyAndValueBuffer.flip();
+            if (keySize < 0 || valSize < 0 || (currentOffset + 20L + keySize + valSize) > fileSize) {
+                truncateCorruptTail(currentOffset, "Abnormally sized keySize or valSize");
+                return;
+            }
+            ByteBuffer totalBuffer = ByteBuffer.allocate(4 + 8 + 4 + 4 + keySize + valSize);
+            channel.read(totalBuffer, currentOffset);
+            totalBuffer.flip();
             byte[] keyBytes = new byte[keySize];
-            keyAndValueBuffer.get(keyBytes);
+            totalBuffer.get(20, keyBytes);
+            CRC32 crc = new CRC32();
+            crc.update(totalBuffer.array(), 4, 8 + 4 + 4 + keySize + valSize);
+            if (storedCrc != (int) crc.getValue()) {
+                truncateCorruptTail(currentOffset, "Failed CRC");
+                return;
+            }
             String key = new String(keyBytes, StandardCharsets.UTF_8);
             Location currentLocation = new Location(0, currentOffset, 20 + keySize + valSize);
             keydir.put(key, currentLocation);
             currentOffset += (20 + keySize + valSize);
+            if (currentOffset == fileSize) {
+                return;
+            }
         }
+    }
+
+    private void truncateCorruptTail(long offset, String reason) throws IOException {
+        System.out.println("restore: corrupt record at offset " + offset + " (" + reason + ") — truncating");
+        channel.truncate(offset);
     }
 
     @Override
