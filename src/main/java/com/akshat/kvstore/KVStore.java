@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -95,8 +96,8 @@ public class KVStore implements AutoCloseable {
         out.putInt(checksum);          // putInt writes all 4 bytes
         out.put(payload.array());      // then the payload, unchanged
         out.flip();                    // switch from write-mode to read-mode
-        channel.write(out);            // channel READS from the buffer
-
+        channel.write(out);             // channel READS from the buffer
+//        channel.force(false);
         int recordSize = 4 + payload.capacity();
 
         // ---------------------------------------------------------------
@@ -115,6 +116,12 @@ public class KVStore implements AutoCloseable {
             channel.read(buffer, location.offset());
             buffer.flip();
             int storedCrc = buffer.getInt();
+            CRC32 crc = new CRC32();
+            crc.update(buffer.array(), 4, location.size() - 4);
+            int recomputedCrc = (int) crc.getValue();
+            if (storedCrc != recomputedCrc) {
+                throw  new IOException("Wrong checksum");
+            }
             long ts = buffer.getLong();
             int keySize = buffer.getInt();
             int valSize = buffer.getInt();
@@ -122,12 +129,8 @@ public class KVStore implements AutoCloseable {
             buffer.get(keyBytes);
             byte[] value = new byte[valSize];
             buffer.get(value);
-
-            CRC32 crc = new CRC32();
-            crc.update(buffer.array(), 4, location.size() - 4);
-            int recomputedCrc = (int) crc.getValue();
-            if (storedCrc != recomputedCrc) {
-                throw  new IOException("Wrong checksum");
+            if (!Arrays.equals(keyBytes, key.getBytes(StandardCharsets.UTF_8))) {
+                throw new IllegalStateException("Key does not match with the key at offset");
             }
             return value;
         }
