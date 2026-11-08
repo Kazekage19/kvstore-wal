@@ -45,17 +45,9 @@ public class KVStore implements AutoCloseable {
 
     public void put(String key, byte[] value) throws IOException {
 
-        // ---------------------------------------------------------------
-        // STEP 1 - build the payload: everything the CRC will cover.
-        //
-        // Layout (from RECORD-FORMAT.md), minus the CRC itself:
+        // Payload = everything the CRC covers (see RECORD-FORMAT.md):
         //     timestamp (8) | keySize (4) | valSize (4) | key | value
-        //
-        // ByteBuffer is just a byte[] with a cursor. Each put* call writes
-        // at the cursor and advances it, so the order of these calls IS the
-        // order of the bytes on disk. Get the order wrong and the file is
-        // unreadable - this is the part to be careful about.
-        // ---------------------------------------------------------------
+        // The order of the put* calls below IS the on-disk byte order.
         byte[] keyBytes = key.getBytes(StandardCharsets.UTF_8);
         long timestamp = System.currentTimeMillis();
 
@@ -67,29 +59,12 @@ public class KVStore implements AutoCloseable {
         payload.put(value);
 
 
-        // ---------------------------------------------------------------
-        // STEP 2 - compute the CRC over the payload bytes.        <- YOU
-        //
-        // Use java.util.zip.CRC32:  new CRC32(), .update(bytes), .getValue()
-        // getValue() returns a long, but CRC32 is only 4 bytes - so you will
-        // need to narrow it when you write it. Think about what you lose.
-        // ---------------------------------------------------------------
-
+        // CRC32.getValue() returns the 32-bit checksum in a long; narrowing to
+        // int keeps all 32 bits (only the sign interpretation changes).
         CRC32 crc = new CRC32();
         crc.update(payload.array());
         int checksum = (int) crc.getValue();
 
-        // ---------------------------------------------------------------
-        // STEP 3 - remember WHERE this record is about to land, then write. <- YOU
-        //
-        // Order matters and it is easy to get backwards: you need the offset
-        // BEFORE you write, because writing moves the cursor. channel.position()
-        // tells you where you are.
-        //
-        // Then write CRC first, payload second - one buffer, one write() call.
-        // A ByteBuffer you have filled needs .flip() before it can be read
-        // back out. Forgetting flip() writes zero bytes and no error.
-        // ---------------------------------------------------------------
         // Where this record is about to land. Read it BEFORE writing,
         // because write() moves the cursor. long, not int - files get big.
         long offset = channel.position();
@@ -99,17 +74,13 @@ public class KVStore implements AutoCloseable {
         ByteBuffer out = ByteBuffer.allocate(4 + payload.capacity());
         out.putInt(checksum);          // putInt writes all 4 bytes
         out.put(payload.array());      // then the payload, unchanged
-        out.flip();                    // switch from write-mode to read-mode
+        out.flip();                    // switch to read-mode; without it write() writes 0 bytes
         channel.write(out);             // channel READS from the buffer
-//        channel.force(false);
+        // Deliberately no channel.force(false): put() returns once the bytes are
+        // in the OS page cache. Survives a process kill, not power loss.
+        // See README "Durability" for what enabling it would cost.
         int recordSize = 4 + payload.capacity();
 
-        // ---------------------------------------------------------------
-        // STEP 4 - update the keydir so a later get() can find this.  <- YOU
-        //
-        // What are the three things a Location needs, and where does each
-        // one come from?
-        // ---------------------------------------------------------------
         keydir.put(key, new Location(fileId, offset, recordSize));
     }
 
